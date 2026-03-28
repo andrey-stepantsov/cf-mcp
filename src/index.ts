@@ -1,3 +1,5 @@
+import { identifyTenant } from "cf-contracts";
+
 export interface Env {
   DB: D1Database;
   VECTORIZE_INDEX: VectorizeIndex;
@@ -8,13 +10,15 @@ export interface Env {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // 1. Authorization Check
+    // 1. Authorization Check (Multi-Tenant)
     const authHeader = request.headers.get("Authorization");
-    if (!env.MCP_SECRET_TOKEN) {
-      return new Response("Server not configured", { status: 500 });
-    }
-    if (!authHeader || authHeader !== `Bearer ${env.MCP_SECRET_TOKEN}`) {
+    if (!authHeader) {
       return new Response("Unauthorized", { status: 401 });
+    }
+
+    const tenant = identifyTenant(authHeader);
+    if (!tenant) {
+      return new Response("Forbidden: Invalid Tenant Token", { status: 403 });
     }
 
     // Only allow POST
@@ -35,20 +39,24 @@ export default {
 
         const id = crypto.randomUUID();
 
-        // Save raw text to D1
-        await env.DB.prepare("INSERT INTO memories (id, content) VALUES (?, ?)")
-          .bind(id, content)
+        // Save raw text to D1 partitioned by Tenant
+        await env.DB.prepare("INSERT INTO memories (id, user_id, namespace, content) VALUES (?, ?, ?, ?)")
+          .bind(id, tenant.userId, tenant.namespace, content)
           .run();
 
         // Generate embedding
         const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [content] });
         const vector = embeddings.data[0];
 
-        // Upsert to Vectorize
+        // Upsert to Vectorize with strict user_id metadata
         await env.VECTORIZE_INDEX.upsert([
           {
             id: id,
             values: vector,
+            metadata: {
+                user_id: tenant.userId,
+                namespace: tenant.namespace
+            }
           }
         ]);
 
@@ -64,7 +72,7 @@ export default {
         return Response.json({ status: "success", id });
 
       } else if (tool === "get_brain_metrics") {
-        const memoryCountResult = await env.DB.prepare("SELECT COUNT(*) as count FROM memories").first();
+        const memoryCountResult = await env.DB.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ?").bind(tenant.userId).first();
         const vectorCount = memoryCountResult?.count || 0;
         
         let avgIngest = 0;
@@ -100,18 +108,23 @@ export default {
         const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] });
         const vector = embeddings.data[0];
 
-        // Search in Vectorize
-        const searchResult = await env.VECTORIZE_INDEX.query(vector, { topK: limit });
+        // Search in Vectorize filtered strictly to this Tenant
+        const searchResult = await env.VECTORIZE_INDEX.query(vector, { 
+            topK: limit, 
+            filter: { 
+                user_id: tenant.userId 
+            } 
+        });
 
         const matchIds = searchResult.matches.map((m: any) => m.id);
         let results: any[] = [];
 
         if (matchIds.length > 0) {
-          // Rehydrate from D1
+          // Rehydrate from D1 (Double check user_id for safety)
           const placeholders = matchIds.map(() => "?").join(",");
           const { results: dbRows } = await env.DB.prepare(
-            `SELECT id, content FROM memories WHERE id IN (${placeholders})`
-          ).bind(...matchIds).all();
+            `SELECT id, content FROM memories WHERE id IN (${placeholders}) AND user_id = ?`
+          ).bind(...matchIds, tenant.userId).all();
 
           results = searchResult.matches.map((m: any) => {
             const dbMatch = dbRows.find((r: any) => r.id === m.id);

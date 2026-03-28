@@ -1,5 +1,9 @@
-CREATE TABLE IF NOT EXISTS memories (
+DROP TABLE IF EXISTS memories;
+
+CREATE TABLE memories (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'personal',
     content TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

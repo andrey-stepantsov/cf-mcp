@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import worker from '../src/index';
 
+// We don't need valid API keys for tests, we just use the mock-andrey-token from cf-contracts
+const mockAuthHeader = 'Bearer mock-andrey-token';
+
 describe('Worker fetch handler', () => {
   let env: any;
   let ctx: any;
 
   beforeEach(() => {
     env = {
-      MCP_SECRET_TOKEN: 'super-secret',
+      MCP_SECRET_TOKEN: 'abc123secret',
       DB: {
         prepare: vi.fn().mockReturnThis(),
         bind: vi.fn().mockReturnThis(),
@@ -32,49 +35,55 @@ describe('Worker fetch handler', () => {
     };
   });
 
-  const createRequest = (method: string, headers: any, body?: any) => {
+  const createRequest = (method: string, headers?: any, body?: any) => {
     return new Request('http://localhost/mcp/call', {
       method,
-      headers: new Headers(headers),
+      headers: new Headers(headers || {}),
       body: body ? JSON.stringify(body) : undefined,
     });
   };
 
-  it('should return 500 if server not configured', async () => {
-    const req = createRequest('POST', {});
-    env.MCP_SECRET_TOKEN = '';
-    const res = await worker.fetch(req, env, ctx);
-    expect(res.status).toBe(500);
-    expect(await res.text()).toBe('Server not configured');
-  });
+
 
   it('should return 401 if unauthorized', async () => {
     const req = createRequest('POST', {});
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(401);
+  });
 
-    const req2 = createRequest('POST', { Authorization: 'Bearer wrong' });
-    const res2 = await worker.fetch(req2, env, ctx);
-    expect(res2.status).toBe(401);
+  it('should return 401 if unauthorized missing header', async () => {
+    const req = createRequest('POST');
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it('should return 403 if token does not map to a logical user', async () => {
+    const req = createRequest('POST', { Authorization: 'Bearer unknown-token' }, { tool: 'save_memory' });
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(403);
   });
 
   it('should return 405 if not POST', async () => {
-    const req = createRequest('GET', { Authorization: 'Bearer super-secret' });
+    const req = createRequest('GET', { Authorization: mockAuthHeader });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(405);
   });
 
   it('should handle save_memory success and log telemetry', async () => {
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'save_memory', params: { content: 'hello world' } });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'save_memory', params: { content: 'hello world' } });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(200);
     const json = await res.json() as any;
     expect(json.status).toBe('success');
     expect(json.id).toBeDefined();
 
-    expect(env.DB.prepare).toHaveBeenCalledWith('INSERT INTO memories (id, content) VALUES (?, ?)');
+    expect(env.DB.prepare).toHaveBeenCalledWith('INSERT INTO memories (id, user_id, namespace, content) VALUES (?, ?, ?, ?)');
     expect(env.AI.run).toHaveBeenCalledWith('@cf/baai/bge-base-en-v1.5', { text: ['hello world'] });
-    expect(env.VECTORIZE_INDEX.upsert).toHaveBeenCalled();
+    expect(env.VECTORIZE_INDEX.upsert).toHaveBeenCalledWith([{
+       id: expect.any(String),
+       values: [0.1, 0.2, 0.3],
+       metadata: { user_id: 'andrey-uid', namespace: 'personal' }
+    }]);
     expect(env.TELEMETRY_SERVICE.fetch).toHaveBeenCalled();
     expect(ctx.waitUntil).toHaveBeenCalled();
   });
@@ -82,11 +91,13 @@ describe('Worker fetch handler', () => {
   it('should handle get_brain_metrics success', async () => {
     env.DB.first = vi.fn().mockResolvedValueOnce({ count: 42 }); // memories
     
-    env.DB.prepare = vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis(), run: vi.fn(), all: vi.fn(), first: env.DB.first });
+    env.DB.prepare = vi.fn().mockReturnValue(env.DB);
 
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'get_brain_metrics' });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'get_brain_metrics' });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(200);
+    expect(env.DB.prepare).toHaveBeenCalledWith('SELECT COUNT(*) as count FROM memories WHERE user_id = ?');
+    expect(env.DB.bind).toHaveBeenCalledWith('andrey-uid');
     const json = await res.json() as any;
     expect(json.total_memories).toBe(42);
     expect(json.vector_count).toBe(42);
@@ -100,7 +111,7 @@ describe('Worker fetch handler', () => {
     env.DB.prepare = vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis(), run: vi.fn(), all: vi.fn(), first: env.DB.first });
     env.TELEMETRY_SERVICE.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'get_brain_metrics' });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'get_brain_metrics' });
     const res = await worker.fetch(req, env, ctx);
     const json = await res.json() as any;
     expect(json.total_memories).toBe(0);
@@ -110,19 +121,19 @@ describe('Worker fetch handler', () => {
   });
 
   it('should return 400 if save_memory content is missing', async () => {
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'save_memory', params: {} });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'save_memory', params: {} });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(400);
   });
 
   it('should return 400 if semantic_search query is missing', async () => {
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'semantic_search', params: {} });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'semantic_search', params: {} });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(400);
   });
 
   it('should handle semantic_search success with empty matches', async () => {
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'semantic_search', params: { query: 'test' } });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'semantic_search', params: { query: 'test' } });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(200);
     const json = await res.json() as any;
@@ -138,7 +149,7 @@ describe('Worker fetch handler', () => {
       results: [] // missing DB row for vector match
     });
 
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'semantic_search', params: { query: 'test', limit: 2 } });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'semantic_search', params: { query: 'test', limit: 2 } });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(200);
     const json = await res.json() as any;
@@ -154,7 +165,7 @@ describe('Worker fetch handler', () => {
       results: [{ id: '123', content: 'db text content' }]
     });
 
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'semantic_search', params: { query: 'test', limit: 2 } });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'semantic_search', params: { query: 'test', limit: 2 } });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(200);
     const json = await res.json() as any;
@@ -163,7 +174,7 @@ describe('Worker fetch handler', () => {
   });
   
   it('should return 404 for unknown tool', async () => {
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'unknown_tool' });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'unknown_tool' });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(404);
   });
@@ -172,7 +183,7 @@ describe('Worker fetch handler', () => {
     env.DB.prepare.mockImplementation(() => {
       throw new Error('DB Crash');
     });
-    const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'save_memory', params: { content: 'test' } });
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'save_memory', params: { content: 'test' } });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(500);
     expect(await res.text()).toContain('DB Crash');
