@@ -26,6 +26,7 @@ export default {
       const { tool, params } = body;
 
       if (tool === "save_memory") {
+        const startTime = Date.now();
         const content = params?.content;
         if (!content || typeof content !== "string") {
           return new Response("Bad Request: content string required", { status: 400 });
@@ -50,8 +51,28 @@ export default {
           }
         ]);
 
+        const latencyMs = Date.now() - startTime;
+        ctx.waitUntil(
+          env.DB.prepare("INSERT INTO ingestion_telemetry (memory_id, latency_ms) VALUES (?, ?)")
+            .bind(id, latencyMs)
+            .run()
+        );
+
         return Response.json({ status: "success", id });
 
+      } else if (tool === "get_brain_metrics") {
+        const memoryCountResult = await env.DB.prepare("SELECT COUNT(*) as count FROM memories").first();
+        const ingestLatencyResult = await env.DB.prepare("SELECT AVG(latency_ms) as avg_latency FROM ingestion_telemetry").first();
+        const searchLatencyResult = await env.DB.prepare("SELECT AVG(latency_ms) as avg_latency FROM search_telemetry").first();
+        
+        const vectorCount = memoryCountResult?.count || 0;
+        
+        return Response.json({
+           total_memories: memoryCountResult?.count || 0,
+           vector_count: vectorCount,
+           avg_ingest_latency_ms: ingestLatencyResult?.avg_latency ? Math.round(Number(ingestLatencyResult.avg_latency)) : 0,
+           avg_search_latency_ms: searchLatencyResult?.avg_latency ? Math.round(Number(searchLatencyResult.avg_latency)) : 0
+        });
       } else if (tool === "semantic_search") {
         const query = params?.query;
         let limit = params?.limit || 3;
