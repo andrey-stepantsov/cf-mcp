@@ -91,9 +91,10 @@ export default {
         const latencyMs = Date.now() - startTime;
 
         // Log telemetry via execution context (so it doesn't block response)
+        const debugInfo = `${query} | SHAPE: ${JSON.stringify(embeddings.shape)} | DATA_LEN: ${embeddings.data.length} | TYPE0: ${typeof embeddings.data[0]}`;
         ctx.waitUntil(
           env.DB.prepare("INSERT INTO search_telemetry (query, latency_ms) VALUES (?, ?)")
-            .bind(query, latencyMs)
+            .bind(debugInfo, latencyMs)
             .run()
         );
 
