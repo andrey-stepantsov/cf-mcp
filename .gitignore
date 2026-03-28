@@ -39,3 +39,4 @@ yarn-error.log*
 # Project specific
 *.cast
 *.mcp.log
+coverage/
