@@ -13,3 +13,7 @@ database_id = "d0e79229-5505-43e4-8d0c-adf994776e08"
 [[vectorize]]
 binding = "VECTORIZE_INDEX"
 index_name = "brain_vectors"
+
+[[services]]
+binding = "TELEMETRY_SERVICE"
+service = "cf-telemetry"

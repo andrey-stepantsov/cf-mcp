@@ -3,6 +3,7 @@ export interface Env {
   VECTORIZE_INDEX: VectorizeIndex;
   AI: any; // Ai mapping from Cloudflare
   MCP_SECRET_TOKEN: string;
+  TELEMETRY_SERVICE: Fetcher;
 }
 
 export default {
@@ -53,25 +54,38 @@ export default {
 
         const latencyMs = Date.now() - startTime;
         ctx.waitUntil(
-          env.DB.prepare("INSERT INTO ingestion_telemetry (memory_id, latency_ms) VALUES (?, ?)")
-            .bind(id, latencyMs)
-            .run()
+          env.TELEMETRY_SERVICE.fetch(new Request('http://internal/log/ingestion', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ memory_id: id, latency_ms: latencyMs })
+          }))
         );
 
         return Response.json({ status: "success", id });
 
       } else if (tool === "get_brain_metrics") {
         const memoryCountResult = await env.DB.prepare("SELECT COUNT(*) as count FROM memories").first();
-        const ingestLatencyResult = await env.DB.prepare("SELECT AVG(latency_ms) as avg_latency FROM ingestion_telemetry").first();
-        const searchLatencyResult = await env.DB.prepare("SELECT AVG(latency_ms) as avg_latency FROM search_telemetry").first();
-        
         const vectorCount = memoryCountResult?.count || 0;
         
+        let avgIngest = 0;
+        let avgSearch = 0;
+
+        try {
+          const metricsRes = await env.TELEMETRY_SERVICE.fetch(new Request('http://internal/metrics', { method: 'POST' }));
+          if (metricsRes.ok) {
+            const mData: any = await metricsRes.json();
+            avgIngest = mData.avg_ingest_latency_ms || 0;
+            avgSearch = mData.avg_search_latency_ms || 0;
+          }
+        } catch (e) {
+          console.error("Telemetry fetch failed", e);
+        }
+
         return Response.json({
            total_memories: memoryCountResult?.count || 0,
            vector_count: vectorCount,
-           avg_ingest_latency_ms: ingestLatencyResult?.avg_latency ? Math.round(Number(ingestLatencyResult.avg_latency)) : 0,
-           avg_search_latency_ms: searchLatencyResult?.avg_latency ? Math.round(Number(searchLatencyResult.avg_latency)) : 0
+           avg_ingest_latency_ms: avgIngest,
+           avg_search_latency_ms: avgSearch
         });
       } else if (tool === "semantic_search") {
         const query = params?.query;
@@ -114,9 +128,11 @@ export default {
         // Log telemetry via execution context (so it doesn't block response)
         const debugInfo = `${query} | SHAPE: ${JSON.stringify(embeddings.shape)} | DATA_LEN: ${embeddings.data.length} | TYPE0: ${typeof embeddings.data[0]}`;
         ctx.waitUntil(
-          env.DB.prepare("INSERT INTO search_telemetry (query, latency_ms) VALUES (?, ?)")
-            .bind(debugInfo, latencyMs)
-            .run()
+          env.TELEMETRY_SERVICE.fetch(new Request('http://internal/log/search', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query: debugInfo, latency_ms: latencyMs })
+          }))
         );
 
         return Response.json({ results, latency_ms: latencyMs });

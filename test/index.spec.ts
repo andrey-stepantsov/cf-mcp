@@ -22,6 +22,9 @@ describe('Worker fetch handler', () => {
       AI: {
         run: vi.fn().mockResolvedValue({ data: [[0.1, 0.2, 0.3]] }),
       },
+      TELEMETRY_SERVICE: {
+        fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ avg_ingest_latency_ms: 121, avg_search_latency_ms: 80 }), { status: 200 }))
+      }
     };
 
     ctx = {
@@ -72,15 +75,12 @@ describe('Worker fetch handler', () => {
     expect(env.DB.prepare).toHaveBeenCalledWith('INSERT INTO memories (id, content) VALUES (?, ?)');
     expect(env.AI.run).toHaveBeenCalledWith('@cf/baai/bge-base-en-v1.5', { text: ['hello world'] });
     expect(env.VECTORIZE_INDEX.upsert).toHaveBeenCalled();
-    expect(env.DB.prepare).toHaveBeenCalledWith('INSERT INTO ingestion_telemetry (memory_id, latency_ms) VALUES (?, ?)');
+    expect(env.TELEMETRY_SERVICE.fetch).toHaveBeenCalled();
     expect(ctx.waitUntil).toHaveBeenCalled();
   });
 
   it('should handle get_brain_metrics success', async () => {
-    env.DB.first = vi.fn()
-      .mockResolvedValueOnce({ count: 42 })           // memories
-      .mockResolvedValueOnce({ avg_latency: 120.5 })  // ingest
-      .mockResolvedValueOnce({ avg_latency: 80.2 });  // search
+    env.DB.first = vi.fn().mockResolvedValueOnce({ count: 42 }); // memories
     
     env.DB.prepare = vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis(), run: vi.fn(), all: vi.fn(), first: env.DB.first });
 
@@ -92,11 +92,13 @@ describe('Worker fetch handler', () => {
     expect(json.vector_count).toBe(42);
     expect(json.avg_ingest_latency_ms).toBe(121);
     expect(json.avg_search_latency_ms).toBe(80);
+    expect(env.TELEMETRY_SERVICE.fetch).toHaveBeenCalled();
   });
 
   it('should handle get_brain_metrics with empty DB results', async () => {
     env.DB.first = vi.fn().mockResolvedValue(null);
     env.DB.prepare = vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis(), run: vi.fn(), all: vi.fn(), first: env.DB.first });
+    env.TELEMETRY_SERVICE.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
 
     const req = createRequest('POST', { Authorization: 'Bearer super-secret' }, { tool: 'get_brain_metrics' });
     const res = await worker.fetch(req, env, ctx);
