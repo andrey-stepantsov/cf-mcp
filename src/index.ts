@@ -149,6 +149,13 @@ export default {
         );
 
         return Response.json({ results, latency_ms: latencyMs });
+      } else if (tool === "export_brain") {
+        // Simple paginated or full pull of a specific tenant's D1 data
+        const { results } = await env.DB.prepare(
+            "SELECT id, user_id, namespace, content, created_at FROM memories WHERE user_id = ?"
+        ).bind(tenant.userId).all();
+
+        return Response.json({ summaries: results });
       }
 
       return new Response("Tool not found", { status: 404 });

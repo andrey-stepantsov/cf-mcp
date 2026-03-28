@@ -172,6 +172,22 @@ describe('Worker fetch handler', () => {
     expect(json.results).toHaveLength(1);
     expect(json.results[0].content).toBe('db text content');
   });
+
+  it('should handle export_brain success', async () => {
+    env.DB.all.mockResolvedValueOnce({
+      results: [{ id: '1', namespace: 'personal', content: 'hello' }]
+    });
+
+    const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'export_brain' });
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(200);
+    expect(env.DB.prepare).toHaveBeenCalledWith('SELECT id, user_id, namespace, content, created_at FROM memories WHERE user_id = ?');
+    expect(env.DB.bind).toHaveBeenCalledWith('andrey-uid');
+    
+    const json = await res.json() as any;
+    expect(json.summaries).toHaveLength(1);
+    expect(json.summaries[0].namespace).toBe('personal');
+  });
   
   it('should return 404 for unknown tool', async () => {
     const req = createRequest('POST', { Authorization: mockAuthHeader }, { tool: 'unknown_tool' });
