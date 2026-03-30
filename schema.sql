@@ -1,6 +1,6 @@
-DROP TABLE IF EXISTS raw_memories;
+DROP TABLE IF EXISTS memories;
 
-CREATE TABLE raw_memories (
+CREATE TABLE memories (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     namespace TEXT NOT NULL DEFAULT 'personal',

@@ -6,10 +6,23 @@ export interface Env {
   MCP_SECRET_TOKEN: string;
   TELEMETRY_SERVICE: Fetcher;
   STORAGE_SERVICE: Fetcher;
+  MCP_DO: DurableObjectNamespace;
 }
+
+export { McpDurableObject } from "./mcp/McpDurableObject";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // 0. WebSocket Upgrade handler (Durable Object Routing)
+    if (request.headers.get("Upgrade") === "websocket") {
+        const url = new URL(request.url);
+        // Map user to their own Durable Object based on auth string,
+        // or just a single brain namespace for now:
+        const id = env.MCP_DO.idFromName(url.hostname);
+        const obj = env.MCP_DO.get(id);
+        return obj.fetch(request);
+    }
+
     // 1. Authorization Check (Multi-Tenant)
     const authHeader = request.headers.get("Authorization");
     if (!authHeader) {
@@ -223,13 +236,26 @@ export default {
     const vault = new CloudflareSecretVault(env);
     const db = new CloudflareD1Proxy(env.STORAGE_SERVICE);
     const telemetry = new CloudflareTelemetryProxy(env.TELEMETRY_SERVICE);
-    const ai = new CloudflareGenerativeAI(env.AI);
+    const ai = new CloudflareGenerativeAI(env);
 
     const engine = new BrainEngine(vault, db, telemetry, ai);
 
     let activeTenants = ["default_tenant"];
-    if ((env as any).ACTIVE_TENANTS) {
-        try { activeTenants = JSON.parse((env as any).ACTIVE_TENANTS); } catch(e) {}
+    try {
+        const tenantRes = await env.STORAGE_SERVICE.fetch(new Request('http://internal/librarian/tenants', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}) 
+        }));
+        
+        if (tenantRes.ok) {
+            const data: any = await tenantRes.json();
+            if (data.tenants && Array.isArray(data.tenants)) {
+                activeTenants = data.tenants;
+            }
+        }
+    } catch (e) {
+        console.warn(`[BrainCron] Failed to fetch dynamic tenants, falling back to defaults`, e);
     }
 
     for (const tenantId of activeTenants) {

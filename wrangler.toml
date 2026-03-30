@@ -29,7 +29,18 @@ VERTEX_REGION = "us-central1"
 # Phase 5: Staging Sealed Brain (Mock TEE)
 # ==========================================
 ACTIVE_TENANTS = '["default_tenant"]'
-MOCK_TENANT_KEYS = '{"default_tenant": "InsecureDevKey_PleaseDoNotUseInProd123456"}'
+
+[[kv_namespaces]]
+binding = "TENANT_VAULT"
+id = "local-dev-id"
+
+[[durable_objects.bindings]]
+name = "MCP_DO"
+class_name = "McpDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["McpDurableObject"]
 
 [triggers]
 crons = ["*/15 * * * *"] # Fires every 15 minutes during Staging/QA
