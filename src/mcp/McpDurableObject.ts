@@ -13,7 +13,7 @@ export class McpDurableObject {
         this.env = env;
 
         this.mcpServer = new Server({
-            name: "cf-mcp-brain",
+            name: "cf-mcp-artefact-manager",
             version: "1.0.0"
         }, {
             capabilities: {
@@ -29,24 +29,24 @@ export class McpDurableObject {
             return {
                 tools: [
                     {
-                        name: "save_memory",
-                        description: "Saves a raw memory node and embeds it.",
-                        inputSchema: { type: "object", properties: { content: { type: "string" } }, required: ["content"] }
+                        name: "read_vfs_file",
+                        description: "Reads a file from the virtual file system.",
+                        inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
                     },
                     {
-                        name: "semantic_search",
-                        description: "Searches for memories by semantic vector proximity.",
-                        inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] }
+                        name: "propose_patch",
+                        description: "Proposes a diff patch to the artefact ledger.",
+                        inputSchema: { type: "object", properties: { file: { type: "string" }, patch: { type: "string" } }, required: ["file", "patch"] }
                     },
                     {
-                        name: "get_brain_metrics",
-                        description: "Returns vault metrics and node counts.",
-                        inputSchema: { type: "object", properties: {} }
+                        name: "write_file_keyframe",
+                        description: "Writes a complete file keyframe to the ledger.",
+                        inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }
                     },
                     {
-                        name: "export_brain",
-                        description: "Exports all decrypted memories.",
-                        inputSchema: { type: "object", properties: {} }
+                        name: "execute_sandbox",
+                        description: "Executes a command directly in the Phantomachine T2 Node Daemon.",
+                        inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
                     }
                 ]
             };
@@ -55,6 +55,49 @@ export class McpDurableObject {
         this.mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (!this.authHeader || !this.blindKey) {
                 return { isError: true, content: [{ type: "text", text: "Missing auth/encryption context in WebSocket upgrade." }] };
+            }
+
+            if (request.params.name === "execute_sandbox") {
+                try {
+                    const wsUrl = this.env.PHANTOMACHINE_URL || "ws://127.0.0.1:4000";
+                    const wsResp = await fetch(wsUrl, {
+                        headers: {
+                            "Upgrade": "websocket",
+                            "Authorization": this.authHeader
+                        }
+                    });
+
+                    if (wsResp.status === 101) {
+                        const ws = wsResp.webSocket;
+                        if (!ws) throw new Error("No websocket in response");
+                        
+                        ws.accept();
+                        let executionResult = "";
+
+                        await new Promise<void>((resolve, reject) => {
+                            ws.addEventListener('message', (msg) => {
+                                executionResult += msg.data + "\n";
+                            });
+                            ws.addEventListener('close', () => resolve());
+                            ws.addEventListener('error', (e) => reject(e));
+                            
+                            // Send execution request formatted for Phantomachine
+                            ws.send(JSON.stringify({ 
+                                event: "EXECUTION_REQUESTED", 
+                                command: request.params.arguments?.command 
+                            }));
+                            
+                            // Close and timeout after reasonable wait for sync MCP
+                            setTimeout(() => { ws.close(); resolve(); }, 10000);
+                        });
+                        
+                        return { isError: false, content: [{ type: "text", text: executionResult || "Execution completed with no output." }] };
+                    } else {
+                        return { isError: true, content: [{ type: "text", text: `Failed to connect to Phantomachine: ${wsResp.status}` }] };
+                    }
+                } catch (err: any) {
+                    return { isError: true, content: [{ type: "text", text: `execute_sandbox proxy failed: ${err.message}` }] };
+                }
             }
 
             // Loopback to the stateless CF Worker router to leverage existing encryption/storage logic
@@ -75,7 +118,7 @@ export class McpDurableObject {
                 // To avoid circular imports, construct the handler manually or import dynamically
                 const { default: worker } = await import("../index");
                 // Mock ExecutionContext since waitUntil isn't strictly required in DO sync tools
-                const mockCtx = { waitUntil: (p: Promise<any>) => p.catch(() => {}) } as ExecutionContext;
+                const mockCtx = { waitUntil: (p: Promise<any>) => p.catch(() => {}) } as unknown as ExecutionContext;
                 
                 const response = await worker.fetch(loopbackReq, this.env, mockCtx);
                 const text = await response.text();

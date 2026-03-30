@@ -2,8 +2,6 @@ name = "cf-mcp"
 main = "src/index.ts"
 compatibility_date = "2024-03-27"
 
-[ai]
-binding = "AI"
 
 [[services]]
 binding = "TELEMETRY_SERVICE"
@@ -19,6 +17,7 @@ service = "cf-mcp-storage"
 # Facet A: Standalone User
 GEMINI_API_KEY = "" # Provide API key to bypass CR Vertex routing
 DISABLE_PROXY_ENCRYPTION = "false" # Set to "true" if hosting on your own Cloudflare account
+PHANTOMACHINE_URL = "ws://127.0.0.1:4000" # Target WebSockets for T2 heavy execution
 
 # Facet B/C: Managed CR Proxy
 GOOGLE_APPLICATION_CREDENTIALS = "" # Vertex AI service account JSON
