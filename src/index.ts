@@ -1,11 +1,11 @@
 import { identifyTenant } from "cf-contracts";
+import { generateKeyFromString, encryptText, decryptText } from "./crypto";
 
 export interface Env {
-  DB: D1Database;
-  VECTORIZE_INDEX: VectorizeIndex;
   AI: any; // Ai mapping from Cloudflare
   MCP_SECRET_TOKEN: string;
   TELEMETRY_SERVICE: Fetcher;
+  STORAGE_SERVICE: Fetcher;
 }
 
 export default {
@@ -20,6 +20,14 @@ export default {
     if (!tenant) {
       return new Response("Forbidden: Invalid Tenant Token", { status: 403 });
     }
+
+    // 2. Encryption Key Extraction
+    const blindKeyHeader = request.headers.get("X-Blind-Key");
+    if (!blindKeyHeader) {
+        return new Response("Forbidden: X-Blind-Key header required for E2EE", { status: 403 });
+    }
+
+    const cryptoKey = await generateKeyFromString(blindKeyHeader);
 
     // Only allow POST
     if (request.method !== "POST") {
@@ -39,26 +47,29 @@ export default {
 
         const id = crypto.randomUUID();
 
-        // Save raw text to D1 partitioned by Tenant
-        await env.DB.prepare("INSERT INTO memories (id, user_id, namespace, content) VALUES (?, ?, ?, ?)")
-          .bind(id, tenant.userId, tenant.namespace, content)
-          .run();
-
         // Generate embedding
         const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [content] });
         const vector = embeddings.data[0];
 
-        // Upsert to Vectorize with strict user_id metadata
-        await env.VECTORIZE_INDEX.upsert([
-          {
-            id: id,
-            values: vector,
-            metadata: {
+        // Encrypt the plaintext payload
+        const encryptedContent = await encryptText(content, cryptoKey);
+
+        // Send to Storage Service (Blind Database)
+        const storageResp = await env.STORAGE_SERVICE.fetch(new Request('http://internal/upsert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: id,
                 user_id: tenant.userId,
-                namespace: tenant.namespace
-            }
-          }
-        ]);
+                namespace: tenant.namespace,
+                encrypted_content: encryptedContent,
+                vector: Array.from(vector)
+            })
+        }));
+
+        if (!storageResp.ok) {
+            throw new Error(`Storage Service Error: await storageResp.text()`);
+        }
 
         const latencyMs = Date.now() - startTime;
         ctx.waitUntil(
@@ -72,9 +83,19 @@ export default {
         return Response.json({ status: "success", id });
 
       } else if (tool === "get_brain_metrics") {
-        const memoryCountResult = await env.DB.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ?").bind(tenant.userId).first();
-        const vectorCount = memoryCountResult?.count || 0;
+        // Query storage service for count
+        const storageResp = await env.STORAGE_SERVICE.fetch(new Request('http://internal/metrics', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: tenant.userId })
+        }));
         
+        let vectorCount = 0;
+        if (storageResp.ok) {
+            const data: any = await storageResp.json();
+            vectorCount = data.total_memories;
+        }
+
         let avgIngest = 0;
         let avgSearch = 0;
 
@@ -90,7 +111,7 @@ export default {
         }
 
         return Response.json({
-           total_memories: memoryCountResult?.count || 0,
+           total_memories: vectorCount,
            vector_count: vectorCount,
            avg_ingest_latency_ms: avgIngest,
            avg_search_latency_ms: avgSearch
@@ -108,37 +129,45 @@ export default {
         const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] });
         const vector = embeddings.data[0];
 
-        // Search in Vectorize filtered strictly to this Tenant
-        const searchResult = await env.VECTORIZE_INDEX.query(vector, { 
-            topK: limit, 
-            filter: { 
-                user_id: tenant.userId 
-            } 
-        });
+        // Query Storage Service
+        const storageResp = await env.STORAGE_SERVICE.fetch(new Request('http://internal/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: tenant.userId,
+                vector: Array.from(vector),
+                limit: limit
+            })
+        }));
 
-        const matchIds = searchResult.matches.map((m: any) => m.id);
         let results: any[] = [];
-
-        if (matchIds.length > 0) {
-          // Rehydrate from D1 (Double check user_id for safety)
-          const placeholders = matchIds.map(() => "?").join(",");
-          const { results: dbRows } = await env.DB.prepare(
-            `SELECT id, content FROM memories WHERE id IN (${placeholders}) AND user_id = ?`
-          ).bind(...matchIds, tenant.userId).all();
-
-          results = searchResult.matches.map((m: any) => {
-            const dbMatch = dbRows.find((r: any) => r.id === m.id);
-            return {
-              id: m.id,
-              score: m.score,
-              content: dbMatch ? dbMatch.content : null
-            };
-          });
+        let debug_matches: any[] = [];
+        if (storageResp.ok) {
+            const data: any = await storageResp.json();
+            const encryptedResults = data.results || [];
+            debug_matches = data.debug_matches || [];
+            
+            // Decrypt results
+            for (const item of encryptedResults) {
+                if (item.encrypted_content) {
+                    try {
+                        const decryptedContent = await decryptText(item.encrypted_content, cryptoKey);
+                        results.push({
+                            id: item.id,
+                            score: item.score,
+                            content: decryptedContent
+                        });
+                    } catch (decErr) {
+                        console.error(`Failed to decrypt matching content ${item.id}`, decErr);
+                        // Skip if it fails due to legacy unencrypted data or incorrect key.
+                    }
+                }
+            }
         }
 
         const latencyMs = Date.now() - startTime;
 
-        // Log telemetry via execution context (so it doesn't block response)
+        // Log telemetry via execution context
         const debugInfo = `${query} | SHAPE: ${JSON.stringify(embeddings.shape)} | DATA_LEN: ${embeddings.data.length} | TYPE0: ${typeof embeddings.data[0]}`;
         ctx.waitUntil(
           env.TELEMETRY_SERVICE.fetch(new Request('http://internal/log/search', {
@@ -148,20 +177,63 @@ export default {
           }))
         );
 
-        return Response.json({ results, latency_ms: latencyMs });
+        return Response.json({ results, latency_ms: latencyMs, debug_matches });
       } else if (tool === "export_brain") {
-        // Simple paginated or full pull of a specific tenant's D1 data
-        const { results } = await env.DB.prepare(
-            "SELECT id, user_id, namespace, content, created_at FROM memories WHERE user_id = ?"
-        ).bind(tenant.userId).all();
+        const storageResp = await env.STORAGE_SERVICE.fetch(new Request('http://internal/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: tenant.userId })
+        }));
 
-        return Response.json({ summaries: results });
+        let summaries: any[] = [];
+        if (storageResp.ok) {
+            const data: any = await storageResp.json();
+            const rawSummaries = data.summaries || [];
+            
+            for (const row of rawSummaries) {
+               try {
+                   const decrypted = await decryptText(row.content, cryptoKey);
+                   summaries.push({
+                       ...row,
+                       content: decrypted
+                   });
+               } catch(ex) {
+                   // Ignore decrypt failures
+               }
+            }
+        }
+
+        return Response.json({ summaries });
       }
 
       return new Response("Tool not found", { status: 404 });
 
     } catch (err: any) {
       return new Response(`Internal error: ${err.message}`, { status: 500 });
+    }
+  },
+
+  async scheduled(event: any, env: Env, ctx: ExecutionContext): Promise<void> {
+    const { BrainEngine } = await import("./librarian/core/BrainEngine");
+    const { CloudflareSecretVault } = await import("./librarian/adapters/CloudflareSecretVault");
+    const { CloudflareD1Proxy } = await import("./librarian/adapters/CloudflareD1Proxy");
+    const { CloudflareTelemetryProxy } = await import("./librarian/adapters/CloudflareTelemetryProxy");
+    const { CloudflareGenerativeAI } = await import("./librarian/adapters/CloudflareGenerativeAI");
+
+    const vault = new CloudflareSecretVault(env);
+    const db = new CloudflareD1Proxy(env.STORAGE_SERVICE);
+    const telemetry = new CloudflareTelemetryProxy(env.TELEMETRY_SERVICE);
+    const ai = new CloudflareGenerativeAI(env.AI);
+
+    const engine = new BrainEngine(vault, db, telemetry, ai);
+
+    let activeTenants = ["default_tenant"];
+    if ((env as any).ACTIVE_TENANTS) {
+        try { activeTenants = JSON.parse((env as any).ACTIVE_TENANTS); } catch(e) {}
+    }
+
+    for (const tenantId of activeTenants) {
+        ctx.waitUntil(engine.runSynthesisLoop(tenantId));
     }
   }
 };
