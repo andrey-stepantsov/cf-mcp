@@ -26,3 +26,26 @@ CREATE TABLE IF NOT EXISTS quota_ledger (
     api_calls INTEGER DEFAULT 0,
     reset_timestamp DATETIME NOT NULL
 );
+
+-- Phase 5.1: The Semantic Graph Memory (Index & Relations)
+
+-- The Persistent Semantic Node (The "What" and "Why")
+CREATE TABLE IF NOT EXISTS markers (
+    marker_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    temporal_ledger_id TEXT NOT NULL, -- FK to events table
+    pragmatic_type TEXT NOT NULL,
+    synthesized_content TEXT NOT NULL,
+    validity_weight REAL DEFAULT 1.0,
+    has_vector_index BOOLEAN DEFAULT FALSE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- The Persistent Semantic Edge (The Knowledge Graph)
+CREATE TABLE IF NOT EXISTS marker_edges (
+    edge_id TEXT PRIMARY KEY,
+    source_marker_id TEXT NOT NULL, -- FK to markers
+    target_entity_id TEXT NOT NULL, -- e.g., an artefact_id or another marker_id
+    relationship_type TEXT NOT NULL, -- e.g., 'AFFECTS_ARTEFACT', 'CAUSED_BY'
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);

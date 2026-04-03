@@ -7,9 +7,14 @@ export interface Env {
   TELEMETRY_SERVICE: Fetcher;
   STORAGE_SERVICE: Fetcher;
   MCP_DO: DurableObjectNamespace;
+  AI: any; // Cloudflare Workers AI binding
+  SEMANTIC_INDEX: any; // VectorizeIndex
+  SYNTHESIS_QUEUE: any; // Queue
 }
 
 export { McpDurableObject } from "./mcp/McpDurableObject";
+import { processSynthesisQueue } from "./queue/Synthesizer";
+import { processDecayCron } from "./cron/DecayJob";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -79,6 +84,20 @@ export default {
             throw new Error(`Storage Service Error: ${await storageResp.text()}`);
         }
 
+        // Phase 5.2: Dispatch to Semantic Synthesis Background Queue
+        // We offload the heavy graph marker embedding to a DLQ-safe worker.
+        try {
+            await env.SYNTHESIS_QUEUE.send({
+                event_id: eventId,
+                session_id: tenant.namespace || "default_session",
+                timestamp: startTime,
+                type: tool,
+                payload: params || {}
+            });
+        } catch (queueErr) {
+            console.error("Failed to enqueue event for semantic synthesis:", queueErr);
+        }
+
         const latencyMs = Date.now() - startTime;
         ctx.waitUntil(
           env.TELEMETRY_SERVICE.fetch(new Request('http://internal/log/artefact_write', {
@@ -136,9 +155,14 @@ export default {
   },
 
   async scheduled(event: any, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Phase 5 legacy BrainEngine synthesis loop has been retired.
-    // The cron hook remains available for future artefact ledger cleanup routines.
-    console.log("[ArtefactCron] Scheduled task executed. No active background processing required at this time.");
+    // Phase 5.2: Semantic Decay Task
+    console.log("[SemanticCron] Running memory decay procedure...");
+    await processDecayCron(env);
+  },
+
+  async queue(batch: any, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Process items via DLQ-safe asynchronous AI vector generator
+    await processSynthesisQueue(batch, env);
   }
 };
 

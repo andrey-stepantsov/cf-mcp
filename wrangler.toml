@@ -43,3 +43,24 @@ new_classes = ["McpDurableObject"]
 
 [triggers]
 crons = ["*/15 * * * *"] # Fires every 15 minutes during Staging/QA
+
+# ==========================================
+# Phase 5.2: Background Semantic Pipeline
+# ==========================================
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "SEMANTIC_INDEX"
+index_name = "cr-semantic-memory-v1"
+
+[[queues.producers]]
+binding = "SYNTHESIS_QUEUE"
+queue = "cr-semantic-synthesis-dlq-safe"
+
+[[queues.consumers]]
+queue = "cr-semantic-synthesis-dlq-safe"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "cr-semantic-synthesis-dlq"
